@@ -248,6 +248,18 @@ export const VoiceCallStreamingConfigSchema = z
 export type VoiceCallStreamingConfig = z.infer<typeof VoiceCallStreamingConfigSchema>;
 
 // -----------------------------------------------------------------------------
+// Conversation Engine
+// -----------------------------------------------------------------------------
+
+/**
+ * Selects the conversation engine:
+ * - "legacy": Current behavior (full embedded-agent per turn). Default.
+ * - "realtime": Persistent realtime session (M2+, not yet implemented).
+ */
+export const ConversationEngineSchema = z.enum(["legacy", "realtime"]);
+export type ConversationEngine = z.infer<typeof ConversationEngineSchema>;
+
+// -----------------------------------------------------------------------------
 // Main Voice Call Configuration
 // -----------------------------------------------------------------------------
 
@@ -323,6 +335,13 @@ export const VoiceCallConfigSchema = z
 
     /** Real-time audio streaming configuration */
     streaming: VoiceCallStreamingConfigSchema,
+
+    /**
+     * Conversation engine selection.
+     * "legacy" = current per-turn agent behavior (default).
+     * "realtime" = persistent realtime session (M2+, not yet implemented).
+     */
+    conversationEngine: ConversationEngineSchema.default("legacy"),
 
     /** Public webhook URL override (if set, bypasses tunnel auto-detection) */
     publicUrl: z.string().url().optional(),

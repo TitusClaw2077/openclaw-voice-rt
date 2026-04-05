@@ -7,6 +7,7 @@ import {
 } from "openclaw/plugin-sdk/voice-call";
 import { normalizeVoiceCallConfig, type VoiceCallConfig } from "./config.js";
 import type { CoreConfig } from "./core-bridge.js";
+import { logLatencyEvent } from "./latency-log.js";
 import type { CallManager } from "./manager.js";
 import type { MediaStreamConfig } from "./media-stream.js";
 import { MediaStreamHandler } from "./media-stream.js";
@@ -138,6 +139,9 @@ export class VoiceCallWebhookServer {
           return;
         }
 
+        logLatencyEvent(call, "speech_end");
+        logLatencyEvent(call, "transcript_final", { chars: transcript.length });
+
         // Create a speech event and process it through the manager
         const event: NormalizedEvent = {
           id: `stream-transcript-${Date.now()}`,
@@ -163,6 +167,11 @@ export class VoiceCallWebhookServer {
         if (this.provider.name === "twilio") {
           (this.provider as TwilioProvider).clearTtsQueue(providerCallId);
         }
+        const call = this.manager.getCallByProviderCallId(providerCallId);
+        if (call) {
+          logLatencyEvent(call, "speech_start");
+          logLatencyEvent(call, "barge_in");
+        }
       },
       onPartialTranscript: (callId, partial) => {
         console.log(`[voice-call] Partial for ${callId}: ${partial}`);
@@ -172,6 +181,11 @@ export class VoiceCallWebhookServer {
         // Register stream with provider for TTS routing
         if (this.provider.name === "twilio") {
           (this.provider as TwilioProvider).registerCallStream(callId, streamSid);
+        }
+
+        const call = this.manager.getCallByProviderCallId(callId);
+        if (call) {
+          logLatencyEvent(call, "stream_connected", { streamSid });
         }
 
         // Speak initial message if one was provided when call was initiated
@@ -462,6 +476,7 @@ export class VoiceCallWebhookServer {
     try {
       const { generateVoiceResponse } = await import("./response-generator.js");
 
+      logLatencyEvent(call, "model_response_start");
       const result = await generateVoiceResponse({
         voiceConfig: this.config,
         coreConfig: this.coreConfig,
@@ -478,7 +493,9 @@ export class VoiceCallWebhookServer {
 
       if (result.text) {
         console.log(`[voice-call] AI response: "${result.text}"`);
+        // TODO(M0): first_audio_byte — wire when StreamingTTSAdapter emits its first chunk (M2+)
         await this.manager.speak(callId, result.text);
+        logLatencyEvent(call, "response_end", { chars: result.text.length });
       }
     } catch (err) {
       console.error(`[voice-call] Auto-response error:`, err);

@@ -141,6 +141,31 @@ export type CallDirection = z.infer<typeof CallDirectionSchema>;
 // Call Record
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// Latency Observability
+// -----------------------------------------------------------------------------
+
+/**
+ * Named events in the per-turn latency timeline.
+ * Logged to CallRecord.latencyEvents for post-call analysis.
+ */
+export type LatencyEventName =
+  | "stream_connected"
+  | "speech_start"
+  | "speech_end"
+  | "transcript_final"
+  | "model_response_start"
+  | "first_audio_byte"
+  | "response_end"
+  | "barge_in";
+
+export type LatencyEvent = {
+  event: LatencyEventName;
+  /** Unix epoch ms */
+  ts: number;
+  metadata?: Record<string, unknown>;
+};
+
 export const TranscriptEntrySchema = z.object({
   timestamp: z.number(),
   speaker: z.enum(["bot", "user"]),
@@ -165,6 +190,8 @@ export const CallRecordSchema = z.object({
   transcript: z.array(TranscriptEntrySchema).default([]),
   processedEventIds: z.array(z.string()).default([]),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  /** Per-call latency event timeline (M0 observability). */
+  latencyEvents: z.array(z.custom<LatencyEvent>()).default([]),
 });
 export type CallRecord = z.infer<typeof CallRecordSchema>;
 
