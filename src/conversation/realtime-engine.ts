@@ -40,6 +40,9 @@ export class RealtimeEngine implements ConversationEngine {
         config: this.config,
         manager: this.manager,
         openaiApiKey,
+        onEscalate: (callId: string, task: string) => {
+          console.log(`[RealtimeEngine] escalating task for callId ${callId}: ${task}`);
+        },
       };
 
       const worker = new VoiceSessionWorker(workerOptions);

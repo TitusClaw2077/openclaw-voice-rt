@@ -10,6 +10,7 @@ export interface VoiceSessionWorkerOptions {
   openaiApiKey: string;
   model?: string;
   onStateChange?: (state: WorkerState) => void;
+  onEscalate?: (callId: string, task: string) => void;
 }
 
 type ChatRole = "system" | "user" | "assistant";
@@ -35,6 +36,8 @@ type ChatCompletionResponse = {
 const MAX_HISTORY_TURNS = 20;
 const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_SYSTEM_PROMPT = "You are a concise, conversational voice assistant on a phone call.";
+const ESCALATION_INSTRUCTION =
+  ' If the user asks for something that requires a tool, lookup, or external action (e.g. check, look up, search, find, send, set, create, schedule, remind, weather, calendar, email), respond ONLY with valid JSON: {"escalate":true,"spoken":"Sure, let me check on that for you.","task":"brief task description"}. Otherwise respond with normal conversational text.';
 
 function pickModelRef(configModel: string | undefined, optionModel: string | undefined): string {
   if (configModel?.trim()) {
@@ -86,6 +89,7 @@ export class VoiceSessionWorker {
   private readonly _apiKey: string;
   private readonly _model: string;
   private readonly _onStateChange?: (state: WorkerState) => void;
+  private readonly _onEscalate?: (callId: string, task: string) => void;
   private _history: ChatMessage[] = [];
   private _generationController: AbortController | null = null;
   private _generationVersion = 0;
@@ -101,6 +105,7 @@ export class VoiceSessionWorker {
     this._apiKey = opts.openaiApiKey;
     this._model = resolveModelName(pickModelRef(opts.config.responseModel, opts.model));
     this._onStateChange = opts.onStateChange;
+    this._onEscalate = opts.onEscalate;
     this._setState("listening");
   }
 
@@ -178,10 +183,11 @@ export class VoiceSessionWorker {
   }
 
   private _buildMessages(): ChatMessage[] {
+    const base = this._config.responseSystemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;
     return [
       {
         role: "system",
-        content: this._config.responseSystemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT,
+        content: base + ESCALATION_INSTRUCTION,
       },
       ...this._history,
     ];
@@ -233,16 +239,33 @@ export class VoiceSessionWorker {
         throw new Error("OpenAI response was empty");
       }
 
+      const escalation = this._tryParseEscalation(text);
+
       this._setState("speaking");
-      await this._speak(text);
 
-      if (this._isStaleGeneration(generationVersion, controller)) {
-        return;
+      if (escalation) {
+        const spoken = escalation.spoken?.trim() || "Let me look into that.";
+        await this._speak(spoken);
+
+        if (this._isStaleGeneration(generationVersion, controller)) {
+          return;
+        }
+
+        this._appendHistory("assistant", spoken);
+        this._generationController = null;
+        this._setState("listening");
+        this._onEscalate?.(this.callId, escalation.task ?? "");
+      } else {
+        await this._speak(text);
+
+        if (this._isStaleGeneration(generationVersion, controller)) {
+          return;
+        }
+
+        this._appendHistory("assistant", text);
+        this._generationController = null;
+        this._setState("listening");
       }
-
-      this._appendHistory("assistant", text);
-      this._generationController = null;
-      this._setState("listening");
     } catch (error) {
       if (this._isStaleGeneration(generationVersion, controller)) {
         return;
@@ -252,6 +275,30 @@ export class VoiceSessionWorker {
       console.error(`[VoiceSessionWorker:${this.callId}]`, error);
       this._setState("listening");
     }
+  }
+
+  private _tryParseEscalation(
+    text: string,
+  ): { escalate: true; spoken?: string; task?: string } | null {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("{")) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed) as { escalate?: unknown; spoken?: unknown; task?: unknown };
+      if (parsed.escalate === true) {
+        return {
+          escalate: true,
+          spoken: typeof parsed.spoken === "string" ? parsed.spoken : undefined,
+          task: typeof parsed.task === "string" ? parsed.task : undefined,
+        };
+      }
+    } catch {
+      // not valid JSON — treat as plain text
+    }
+
+    return null;
   }
 
   private async _speak(text: string): Promise<void> {
