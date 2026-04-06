@@ -1,22 +1,50 @@
 /**
  * test-worker.mjs
  *
- * Isolation test for VoiceSessionWorker.
- * Run with: node test-worker.mjs
- * Requires: OPENAI_API_KEY env var set
- * No Twilio, no OpenClaw, no phone needed.
+ * Isolation test for realtime voice reply / escalation behavior.
+ *
+ * Supported auth methods:
+ *   1) OPENAI_API_KEY=... node test-worker.mjs
+ *   2) node test-worker.mjs --api-key sk-...
+ *   3) create .env with OPENAI_API_KEY=...
  */
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+import fs from 'node:fs';
+
+function loadDotEnv(path = '.env') {
+  if (!fs.existsSync(path)) return;
+  const raw = fs.readFileSync(path, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
+function getArgValue(name) {
+  const idx = process.argv.indexOf(name);
+  return idx >= 0 ? process.argv[idx + 1] : undefined;
+}
+
+loadDotEnv();
+
+const OPENAI_API_KEY = getArgValue('--api-key') || process.env.OPENAI_API_KEY;
 if (!OPENAI_API_KEY) {
-  console.error("ERROR: OPENAI_API_KEY env var is not set");
+  console.error('ERROR: OPENAI_API_KEY is not set. Use one of these:');
+  console.error('  1) OPENAI_API_KEY=... node test-worker.mjs');
+  console.error('  2) node test-worker.mjs --api-key sk-...');
+  console.error('  3) create /tmp/openclaw-voice-rt/.env with OPENAI_API_KEY=...');
   process.exit(1);
 }
 
-const CALL_ID = "test-call-001";
-const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_SYSTEM_PROMPT = "You are a concise, conversational voice assistant on a phone call.";
-
+const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 const SYSTEM_PROMPT = `You are Titus, David's AI assistant. Sharp, direct, dry humor. Keep responses to 1-3 sentences max. You are on a phone call.
 
 IMPORTANT: If the user asks you to perform an action (check calendar, look something up, send a message, get the weather, set a reminder, find something, etc.), respond ONLY with this JSON:
@@ -26,13 +54,13 @@ For normal conversation, respond with plain text only.`;
 
 function tryParseEscalation(text) {
   const trimmed = text.trim();
-  if (!trimmed.startsWith("{")) return null;
+  if (!trimmed.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed?.escalate === true) {
       return {
-        spoken: typeof parsed.spoken === "string" ? parsed.spoken.trim() : "Let me look into that.",
-        task: typeof parsed.task === "string" ? parsed.task.trim() : "unknown task"
+        spoken: typeof parsed.spoken === 'string' ? parsed.spoken.trim() : 'Let me look into that.',
+        task: typeof parsed.task === 'string' ? parsed.task.trim() : 'unknown task',
       };
     }
   } catch {}
@@ -41,21 +69,29 @@ function tryParseEscalation(text) {
 
 async function ask(userMessage) {
   const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: userMessage }
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userMessage },
   ];
+
   const res = await fetch(OPENAI_CHAT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
-    body: JSON.stringify({ model: "gpt-4o-mini", messages })
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({ model: 'gpt-4o-mini', messages }),
   });
-  if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
+
+  if (!res.ok) {
+    throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
+  }
+
   const payload = await res.json();
-  return payload.choices?.[0]?.message?.content?.trim() ?? "";
+  return payload.choices?.[0]?.message?.content?.trim() ?? '';
 }
 
 async function runTest(label, userMessage, expectEscalation) {
-  console.log(`\n${"─".repeat(60)}`);
+  console.log(`\n${'─'.repeat(60)}`);
   console.log(`TEST: ${label}`);
   console.log(`USER: "${userMessage}"`);
 
@@ -71,31 +107,30 @@ async function runTest(label, userMessage, expectEscalation) {
     if (esc) {
       console.log(`→ ESCALATED | spoken: "${esc.spoken}" | task: "${esc.task}"`);
     } else {
-      console.log(`→ NORMAL REPLY`);
+      console.log('→ NORMAL REPLY');
     }
 
     const matched = expectEscalation === !!esc;
-    console.log(matched ? "✅ PASS" : `⚠️ EXPECTED ${expectEscalation ? "ESCALATION" : "NORMAL"}`);
+    console.log(matched ? '✅ PASS' : `⚠️ EXPECTED ${expectEscalation ? 'ESCALATION' : 'NORMAL'}`);
   } catch (err) {
     console.error(`❌ ERROR: ${err.message}`);
   }
 }
 
-(async () => {
-  console.log("🧪 VoiceSessionWorker Isolation Test");
-  console.log(`Model: gpt-4o-mini | Key: ${OPENAI_API_KEY.slice(0,10)}...`);
+console.log('🧪 VoiceSessionWorker Isolation Test');
+console.log(`Model: gpt-4o-mini | Key: ${OPENAI_API_KEY.slice(0, 10)}...`);
+console.log(`Key source: ${getArgValue('--api-key') ? '--api-key' : (process.env.OPENAI_API_KEY ? 'env/.env' : 'unknown')}`);
 
-  await runTest("Greeting",          "Hey, what's up?",                             false);
-  await runTest("Simple question",   "How are you doing today?",                    false);
-  await runTest("Weather",           "What's the weather like today?",              true);
-  await runTest("Calendar check",    "Can you check my calendar for tomorrow?",     true);
-  await runTest("Set a reminder",    "Remind me to call mom at 5pm",               true);
-  await runTest("Topic discussion",  "Tell me something interesting about rockets", false);
+await runTest('Greeting', 'Hey, what\'s up?', false);
+await runTest('Simple question', 'How are you doing today?', false);
+await runTest('Weather', 'What\'s the weather like today?', true);
+await runTest('Calendar check', 'Can you check my calendar for tomorrow?', true);
+await runTest('Set a reminder', 'Remind me to call mom at 5pm', true);
+await runTest('Topic discussion', 'Tell me something interesting about rockets', false);
 
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("Done. Review:");
-  console.log("  ✅ Normal replies → plain text, no JSON, low latency");
-  console.log("  ✅ Tool requests  → escalation JSON + spoken ACK");
-  console.log("  ✅ Latency        → target under 3000ms per turn");
-  console.log(`${"═".repeat(60)}\n`);
-})();
+console.log(`\n${'═'.repeat(60)}`);
+console.log('Done. Review:');
+console.log('  ✅ Normal replies -> plain text, no JSON, low latency');
+console.log('  ✅ Tool requests  -> escalation JSON + spoken ACK');
+console.log('  ✅ Latency        -> target under 3000ms per turn');
+console.log(`${'═'.repeat(60)}\n`);
