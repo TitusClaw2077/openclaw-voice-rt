@@ -8,7 +8,8 @@ import type { CallRecord } from "../types.js";
 export class RealtimeEngine implements ConversationEngine {
   private readonly config: VoiceCallConfig;
   private readonly manager: CallManager;
-  private readonly coreConfig: CoreConfig;
+  private readonly coreConfig: CoreConfig; // reserved for future tool use in M4
+  private readonly fallbackToLegacy = false;
   private readonly workers = new Map<string, VoiceSessionWorker>();
 
   constructor(
@@ -18,31 +19,40 @@ export class RealtimeEngine implements ConversationEngine {
     this.config = config;
     this.manager = deps.manager;
     this.coreConfig = deps.coreConfig;
+    this.fallbackToLegacy = !config.streaming.enabled;
   }
 
   async onCallConnected(call: CallRecord): Promise<void> {
-    const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is required");
-    }
-
-    const workerOptions: VoiceSessionWorkerOptions = {
-      callId: call.callId,
-      config: this.config,
-      manager: this.manager,
-      openaiApiKey,
-    };
-
     const existingWorker = this.workers.get(call.callId);
     if (existingWorker) {
       existingWorker.dispose();
     }
 
-    const worker = new VoiceSessionWorker(workerOptions);
-    this.workers.set(call.callId, worker);
-    console.log(`[RealtimeEngine] worker created for callId ${call.callId}`);
+    try {
+      const openaiApiKey =
+        this.config.streaming.openaiApiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
+      if (!openaiApiKey) {
+        throw new Error("OPENAI_API_KEY is required");
+      }
 
-    void this.coreConfig;
+      const workerOptions: VoiceSessionWorkerOptions = {
+        callId: call.callId,
+        config: this.config,
+        manager: this.manager,
+        openaiApiKey,
+      };
+
+      const worker = new VoiceSessionWorker(workerOptions);
+      this.workers.set(call.callId, worker);
+      console.log(`[RealtimeEngine] worker created for callId ${call.callId}`);
+    } catch (err) {
+      console.error(
+        `[RealtimeEngine] failed to create worker for callId ${call.callId}: ${String(err)}`,
+      );
+      if (!this.fallbackToLegacy) {
+        this.handleWorkerError(call.callId, err);
+      }
+    }
   }
 
   onSpeechStart(callId: string): void {
@@ -55,7 +65,12 @@ export class RealtimeEngine implements ConversationEngine {
   async onFinalTranscript(callId: string, text: string): Promise<void> {
     const worker = this.workers.get(callId);
     if (!worker) {
-      console.warn(`[RealtimeEngine] worker not found for callId ${callId}`);
+      console.warn(`[RealtimeEngine] no worker for callId ${callId}, transcript dropped`);
+      return;
+    }
+
+    if (worker.state === "ended") {
+      console.warn(`[RealtimeEngine] worker ended for callId ${callId}, transcript dropped`);
       return;
     }
 
@@ -89,5 +104,14 @@ export class RealtimeEngine implements ConversationEngine {
     }
 
     this.workers.delete(callId);
+  }
+
+  private handleWorkerError(callId: string, err: unknown): void {
+    console.error(`[RealtimeEngine] worker error for callId ${callId}: ${String(err)}`);
+    void this.manager.endCall(callId).catch((endErr) => {
+      console.error(
+        `[RealtimeEngine] failed to end callId ${callId} after worker error: ${String(endErr)}`,
+      );
+    });
   }
 }
