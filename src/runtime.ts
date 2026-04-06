@@ -1,4 +1,5 @@
 import type { VoiceCallConfig } from "./config.js";
+import { createConversationEngine, type ConversationEngine } from "./conversation/index.js";
 import { resolveVoiceCallConfig, validateProviderConfig } from "./config.js";
 import type { CoreConfig } from "./core-bridge.js";
 import { CallManager } from "./manager.js";
@@ -18,6 +19,7 @@ export type VoiceCallRuntime = {
   provider: VoiceCallProvider;
   manager: CallManager;
   webhookServer: VoiceCallWebhookServer;
+  engine: ConversationEngine;
   webhookUrl: string;
   publicUrl: string | null;
   stop: () => Promise<void>;
@@ -237,6 +239,12 @@ export async function createVoiceCallRuntime(params: {
 
     await manager.initialize(provider, webhookUrl);
 
+    const engine = createConversationEngine(config, {
+      manager,
+      coreConfig,
+    });
+    webhookServer.setEngine(engine);
+
     const stop = async () => await lifecycle.stop();
 
     log.info("[voice-call] Runtime initialized");
@@ -250,6 +258,7 @@ export async function createVoiceCallRuntime(params: {
       provider,
       manager,
       webhookServer,
+      engine,
       webhookUrl,
       publicUrl,
       stop,

@@ -1,5 +1,6 @@
 import http from "node:http";
 import { URL } from "node:url";
+import { bindLegacyInboundResponseHandler, type ConversationEngine } from "./conversation/index.js";
 import {
   isRequestBodyLimitError,
   readRequestBodyWithLimit,
@@ -56,7 +57,9 @@ export class VoiceCallWebhookServer {
   private manager: CallManager;
   private provider: VoiceCallProvider;
   private coreConfig: CoreConfig | null;
+  private engine: ConversationEngine | null = null;
   private stopStaleCallReaper: (() => void) | null = null;
+  private endedCallIds = new Set<string>();
 
   /** Media stream handler for bidirectional audio (when streaming enabled) */
   private mediaStreamHandler: MediaStreamHandler | null = null;
@@ -83,6 +86,13 @@ export class VoiceCallWebhookServer {
    */
   getMediaStreamHandler(): MediaStreamHandler | null {
     return this.mediaStreamHandler;
+  }
+
+  setEngine(engine: ConversationEngine): void {
+    this.engine = engine;
+    bindLegacyInboundResponseHandler(this.engine, async (callId, text) => {
+      await this.handleInboundResponse(callId, text);
+    });
   }
 
   /**
@@ -158,9 +168,15 @@ export class VoiceCallWebhookServer {
         const callMode = call.metadata?.mode as string | undefined;
         const shouldRespond = call.direction === "inbound" || callMode === "conversation";
         if (shouldRespond) {
-          this.handleInboundResponse(call.callId, transcript).catch((err) => {
-            console.warn(`[voice-call] Failed to auto-respond:`, err);
-          });
+          if (this.engine) {
+            this.engine.onFinalTranscript(call.callId, transcript).catch((err) => {
+              console.warn(`[voice-call] Failed to auto-respond:`, err);
+            });
+          } else {
+            this.handleInboundResponse(call.callId, transcript).catch((err) => {
+              console.warn(`[voice-call] Failed to auto-respond:`, err);
+            });
+          }
         }
       },
       onSpeechStart: (providerCallId) => {
@@ -171,6 +187,7 @@ export class VoiceCallWebhookServer {
         if (call) {
           logLatencyEvent(call, "speech_start");
           logLatencyEvent(call, "barge_in");
+          this.engine?.onSpeechStart(call.callId);
         }
       },
       onPartialTranscript: (callId, partial) => {
@@ -186,6 +203,11 @@ export class VoiceCallWebhookServer {
         const call = this.manager.getCallByProviderCallId(callId);
         if (call) {
           logLatencyEvent(call, "stream_connected", { streamSid });
+          if (this.engine) {
+            void this.engine.onCallConnected(call).catch((err) => {
+              console.warn(`[voice-call] Failed to notify engine of connected call:`, err);
+            });
+          }
         }
 
         // Speak initial message if one was provided when call was initiated
@@ -205,6 +227,12 @@ export class VoiceCallWebhookServer {
           console.log(
             `[voice-call] Auto-ending call ${disconnectedCall.callId} on stream disconnect`,
           );
+          void this.notifyEngineCallEnded(disconnectedCall.callId).catch((err) => {
+            console.warn(
+              `[voice-call] Failed to notify engine of ended call ${disconnectedCall.callId}:`,
+              err,
+            );
+          });
           void this.manager.endCall(disconnectedCall.callId).catch((err) => {
             console.warn(`[voice-call] Failed to auto-end call ${disconnectedCall.callId}:`, err);
           });
@@ -427,6 +455,13 @@ export class VoiceCallWebhookServer {
     for (const event of events) {
       try {
         this.manager.processEvent(event);
+        if (event.type === "call.ended") {
+          // TODO(M1): notify the engine directly from manager-owned end paths once
+          // the manager exposes lifecycle hooks for non-webhook termination flows.
+          void this.notifyEngineCallEnded(event.callId).catch((err) => {
+            console.error(`[voice-call] Error notifying engine of ended call ${event.callId}:`, err);
+          });
+        }
       } catch (err) {
         console.error(`[voice-call] Error processing event ${event.type}:`, err);
       }
@@ -452,6 +487,24 @@ export class VoiceCallWebhookServer {
     timeoutMs = 30_000,
   ): Promise<string> {
     return readRequestBodyWithLimit(req, { maxBytes, timeoutMs });
+  }
+
+  private async notifyEngineCallEnded(callId: string): Promise<void> {
+    if (!this.engine) {
+      return;
+    }
+
+    if (this.endedCallIds.has(callId)) {
+      return;
+    }
+
+    this.endedCallIds.add(callId);
+    try {
+      await this.engine.onCallEnded(callId);
+    } catch (err) {
+      this.endedCallIds.delete(callId);
+      throw err;
+    }
   }
 
   /**
