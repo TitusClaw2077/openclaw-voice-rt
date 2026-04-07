@@ -102,6 +102,18 @@ export class TwilioProvider implements VoiceCallProvider {
   /** Track notify-mode calls to avoid streaming on follow-up callbacks */
   private readonly notifyCalls = new Set<string>();
   private readonly activeStreamCalls = new Set<string>();
+  private readonly streamAttachState = new Map<
+    string,
+    {
+      streamRequestedAt?: number;
+      streamConnectedAt?: number;
+      fallbackAllowedAt?: number;
+      fallbackAllowedReason?: string;
+      fallbackSuppressedAt?: number;
+      initialSpeechHandledAt?: number;
+      firstResponseStartedAt?: number;
+    }
+  >();
 
   /**
    * Delete stored TwiML for a given `callId`.
@@ -170,11 +182,90 @@ export class TwilioProvider implements VoiceCallProvider {
 
   registerCallStream(callSid: string, streamSid: string): void {
     this.callStreamMap.set(callSid, streamSid);
+    this.markStreamConnected(callSid);
   }
 
   unregisterCallStream(callSid: string): void {
     this.callStreamMap.delete(callSid);
     this.activeStreamCalls.delete(callSid);
+    this.streamAttachState.delete(callSid);
+  }
+
+  markStreamRequested(callSid: string): void {
+    const state = this.getOrCreateStreamAttachState(callSid);
+    if (!state.streamRequestedAt) {
+      state.streamRequestedAt = Date.now();
+    }
+  }
+
+  markStreamConnected(callSid: string): void {
+    const state = this.getOrCreateStreamAttachState(callSid);
+    if (!state.streamRequestedAt) {
+      state.streamRequestedAt = Date.now();
+    }
+    state.streamConnectedAt = Date.now();
+  }
+
+  markInitialSpeechHandled(callSid: string): void {
+    this.getOrCreateStreamAttachState(callSid).initialSpeechHandledAt = Date.now();
+  }
+
+  markFirstResponseStarted(callSid: string): void {
+    const state = this.getOrCreateStreamAttachState(callSid);
+    if (!state.firstResponseStartedAt) {
+      state.firstResponseStartedAt = Date.now();
+    }
+  }
+
+  allowFallbackForCall(callSid: string, reason: string): void {
+    const state = this.getOrCreateStreamAttachState(callSid);
+    state.fallbackAllowedAt = Date.now();
+    state.fallbackAllowedReason = reason;
+  }
+
+  getIntroState(callSid: string): {
+    hasActiveStream: boolean;
+    streamRequestedAt?: number;
+    streamConnectedAt?: number;
+    initialSpeechHandled: boolean;
+    firstResponseStarted: boolean;
+    fallbackSuppressed: boolean;
+    fallbackAllowed: boolean;
+    fallbackAllowedReason?: string;
+    fallbackPending: boolean;
+  } {
+    const state = this.streamAttachState.get(callSid);
+    const hasActiveStream = this.callStreamMap.has(callSid);
+    const fallbackAllowed = Boolean(state?.fallbackAllowedAt);
+    const fallbackSuppressed = Boolean(state?.fallbackSuppressedAt) && !fallbackAllowed;
+    const streamRequestedAt = state?.streamRequestedAt;
+    const streamConnectedAt = state?.streamConnectedAt;
+    const fallbackPending =
+      Boolean(this.options.streamPath) &&
+      Boolean(streamRequestedAt) &&
+      !streamConnectedAt &&
+      !fallbackAllowed;
+
+    return {
+      hasActiveStream,
+      streamRequestedAt,
+      streamConnectedAt,
+      initialSpeechHandled: Boolean(state?.initialSpeechHandledAt),
+      firstResponseStarted: Boolean(state?.firstResponseStartedAt),
+      fallbackSuppressed,
+      fallbackAllowed,
+      fallbackAllowedReason: state?.fallbackAllowedReason,
+      fallbackPending,
+    };
+  }
+
+  private getOrCreateStreamAttachState(callSid: string) {
+    let state = this.streamAttachState.get(callSid);
+    if (!state) {
+      state = {};
+      this.streamAttachState.set(callSid, state);
+    }
+    return state;
   }
 
   isValidStreamToken(callSid: string, token?: string): boolean {
@@ -348,6 +439,7 @@ export class TwilioProvider implements VoiceCallProvider {
     if (endReason) {
       this.streamAuthTokens.delete(callSid);
       this.activeStreamCalls.delete(callSid);
+      this.streamAttachState.delete(callSid);
       if (callIdOverride) {
         this.deleteStoredTwiml(callIdOverride);
       }
@@ -408,6 +500,9 @@ export class TwilioProvider implements VoiceCallProvider {
         return TwilioProvider.PAUSE_TWIML;
       case "stream": {
         const streamUrl = view.callSid ? this.getStreamUrlForCall(view.callSid) : null;
+        if (view.callSid && streamUrl) {
+          this.markStreamRequested(view.callSid);
+        }
         return streamUrl ? this.getStreamConnectXml(streamUrl) : TwilioProvider.PAUSE_TWIML;
       }
       case "empty":
@@ -556,17 +651,22 @@ export class TwilioProvider implements VoiceCallProvider {
    *    Note: This may not work on all Twilio accounts.
    */
   async playTts(input: PlayTtsInput): Promise<void> {
+    const introState = this.getIntroState(input.providerCallId);
+    this.markFirstResponseStarted(input.providerCallId);
+
     // Try telephony TTS via media stream first (if configured)
     const streamSid = this.callStreamMap.get(input.providerCallId);
     if (this.ttsProvider && this.mediaStreamHandler && streamSid) {
       try {
         await this.playTtsViaStream(input.text, streamSid);
+        this.markInitialSpeechHandled(input.providerCallId);
         return;
       } catch (err) {
         console.warn(
           `[voice-call] Telephony TTS failed, falling back to Twilio <Say>:`,
           err instanceof Error ? err.message : err,
         );
+        this.allowFallbackForCall(input.providerCallId, "stream_tts_failed");
         // Fall through to TwiML <Say> fallback
       }
     }
@@ -577,14 +677,26 @@ export class TwilioProvider implements VoiceCallProvider {
       throw new Error("Missing webhook URL for this call (provider state not initialized)");
     }
 
-    if (this.options.streamPath && !call.streamSid) {
-      console.log("[voice-call] Realtime/streaming mode active, suppressing TwiML <Say> fallback intro");
+    if (this.options.streamPath && introState.fallbackPending) {
+      const state = this.getOrCreateStreamAttachState(input.providerCallId);
+      if (!state.fallbackSuppressedAt) {
+        state.fallbackSuppressedAt = Date.now();
+      }
+      console.log(
+        `[voice-call] Realtime/streaming mode active, suppressing TwiML <Say> fallback intro for ${input.providerCallId}`,
+      );
       return;
     }
 
-    console.warn(
-      "[voice-call] Using TwiML <Say> fallback - telephony TTS not configured or media stream not active",
-    );
+    if (this.options.streamPath && introState.fallbackAllowed) {
+      console.warn(
+        `[voice-call] Using TwiML <Say> fallback after explicit stream attach failure/timeout for ${input.providerCallId} (${introState.fallbackAllowedReason ?? "unknown"})`,
+      );
+    } else {
+      console.warn(
+        "[voice-call] Using TwiML <Say> fallback - telephony TTS not configured or media stream not active",
+      );
+    }
 
     const pollyVoice = mapVoiceToPolly(input.voice);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -598,6 +710,7 @@ export class TwilioProvider implements VoiceCallProvider {
     await this.apiRequest(`/Calls/${input.providerCallId}.json`, {
       Twiml: twiml,
     });
+    this.markInitialSpeechHandled(input.providerCallId);
   }
 
   /**

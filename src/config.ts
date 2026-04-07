@@ -231,6 +231,8 @@ export const VoiceCallStreamingConfigSchema = z
     maxPendingConnectionsPerIp: z.number().int().positive().default(4),
     /** Hard cap for all open media stream sockets (pending + active). */
     maxConnections: z.number().int().positive().default(128),
+    /** How long to wait for a Twilio media stream to attach before allowing fallback speech. */
+    streamAttachTimeoutMs: z.number().int().positive().default(4000),
   })
   .strict()
   .default({
@@ -244,6 +246,7 @@ export const VoiceCallStreamingConfigSchema = z
     maxPendingConnections: 32,
     maxPendingConnectionsPerIp: 4,
     maxConnections: 128,
+    streamAttachTimeoutMs: 4000,
   });
 export type VoiceCallStreamingConfig = z.infer<typeof VoiceCallStreamingConfigSchema>;
 

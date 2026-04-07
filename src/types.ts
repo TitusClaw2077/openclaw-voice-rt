@@ -150,10 +150,15 @@ export type CallDirection = z.infer<typeof CallDirectionSchema>;
  * Logged to CallRecord.latencyEvents for post-call analysis.
  */
 export type LatencyEventName =
+  | "webhook_received"
+  | "twiml_generated"
+  | "stream_requested"
   | "stream_connected"
   | "speech_start"
   | "speech_end"
   | "transcript_final"
+  | "fallback_suppressed"
+  | "fallback_allowed"
   | "model_response_start"
   | "first_audio_byte"
   | "response_end"

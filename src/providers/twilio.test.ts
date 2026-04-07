@@ -188,4 +188,54 @@ describe("TwilioProvider", () => {
     expect(event?.type).toBe("call.speech");
     expect(event?.turnToken).toBe("turn-xyz");
   });
+
+
+  it("suppresses TwiML fallback while realtime stream attach is pending", async () => {
+    const provider = createProvider();
+    const callSid = "CA901";
+    provider["callWebhookUrls"].set(callSid, "https://example.ngrok.app/voice/webhook?callId=call-901");
+    provider.markStreamRequested(callSid);
+
+    let twimlSent = false;
+    provider["apiRequest"] = async () => {
+      twimlSent = true;
+      return {} as never;
+    };
+
+    await provider.playTts({ callId: "call-901", providerCallId: callSid, text: "hello" });
+
+    expect(twimlSent).toBe(false);
+    expect(provider.getIntroState(callSid).fallbackPending).toBe(true);
+  });
+
+  it("allows TwiML fallback exactly once after explicit timeout/failure", async () => {
+    const provider = createProvider();
+    const callSid = "CA902";
+    provider["callWebhookUrls"].set(callSid, "https://example.ngrok.app/voice/webhook?callId=call-902");
+    provider.markStreamRequested(callSid);
+    provider.allowFallbackForCall(callSid, "stream_attach_timeout");
+
+    let sentTwiml: Record<string, string | string[]> | undefined;
+    provider["apiRequest"] = async (_endpoint: string, params: Record<string, string | string[]>) => {
+      sentTwiml = params;
+      return {} as never;
+    };
+
+    await provider.playTts({ callId: "call-902", providerCallId: callSid, text: "hello" });
+
+    expect(String(sentTwiml?.Twiml ?? "")).toContain("<Say");
+    expect(provider.getIntroState(callSid).fallbackAllowed).toBe(true);
+  });
+
+  it("marks stream connected state when media stream attaches", () => {
+    const provider = createProvider();
+    const callSid = "CA903";
+    provider.markStreamRequested(callSid);
+    provider.registerCallStream(callSid, "MZ123");
+
+    const state = provider.getIntroState(callSid);
+    expect(state.hasActiveStream).toBe(true);
+    expect(state.streamConnectedAt).toBeTypeOf("number");
+  });
+
 });

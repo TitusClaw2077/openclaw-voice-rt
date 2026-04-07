@@ -255,6 +255,7 @@ export async function speakInitialMessage(
   }
 
   console.log(`[voice-call] Speaking initial message for call ${call.callId} (mode: ${mode})`);
+  logLatencyEvent(call, "model_response_start", { callSid: providerCallId, initialMessage: true });
   const result = await speak(ctx, call.callId, initialMessage);
   if (!result.success) {
     console.warn(`[voice-call] Failed to speak initial message: ${result.error}`);

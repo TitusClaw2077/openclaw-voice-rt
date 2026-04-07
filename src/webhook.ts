@@ -17,6 +17,7 @@ import { OpenAIRealtimeSTTProvider } from "./providers/stt-openai-realtime.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import type { NormalizedEvent, WebhookContext } from "./types.js";
 import { startStaleCallReaper } from "./webhook/stale-call-reaper.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
@@ -92,6 +93,29 @@ export class VoiceCallWebhookServer {
     this.engine = engine;
     bindLegacyInboundResponseHandler(this.engine, async (callId, text) => {
       await this.handleInboundResponse(callId, text);
+    });
+  }
+
+  private scheduleStreamAttachFallbackCheck(callId: string): void {
+    if (this.provider.name !== "twilio") {
+      return;
+    }
+    const twilio = this.provider as TwilioProvider;
+    const timeoutMs = this.config.streaming.streamAttachTimeoutMs;
+    void sleep(timeoutMs).then(() => {
+      const call = this.manager.getCallByProviderCallId(callId);
+      if (!call) {
+        return;
+      }
+      const state = twilio.getIntroState(callId);
+      if (!state.streamRequestedAt || state.streamConnectedAt || state.fallbackAllowed) {
+        return;
+      }
+      twilio.allowFallbackForCall(callId, "stream_attach_timeout");
+      logLatencyEvent(call, "fallback_allowed", { callSid: callId, reason: "stream_attach_timeout" });
+      console.warn(
+        `[voice-call] Stream attach timeout for ${callId}, allowing TwiML fallback intro after ${timeoutMs}ms`,
+      );
     });
   }
 
@@ -202,7 +226,7 @@ export class VoiceCallWebhookServer {
 
         const call = this.manager.getCallByProviderCallId(callId);
         if (call) {
-          logLatencyEvent(call, "stream_connected", { streamSid });
+          logLatencyEvent(call, "stream_connected", { callSid: callId, streamSid });
           if (this.engine) {
             void this.engine.onCallConnected(call).catch((err) => {
               console.warn(`[voice-call] Failed to notify engine of connected call:`, err);
@@ -432,6 +456,12 @@ export class VoiceCallWebhookServer {
       remoteAddress: req.socket.remoteAddress ?? undefined,
     };
 
+    const rawCallSid = new URLSearchParams(body).get("CallSid") || undefined;
+    const existingCall = rawCallSid ? this.manager.getCallByProviderCallId(rawCallSid) : undefined;
+    if (existingCall) {
+      logLatencyEvent(existingCall, "webhook_received", { callSid: rawCallSid });
+    }
+
     const verification = this.provider.verifyWebhook(ctx);
     if (!verification.ok) {
       console.warn(`[voice-call] Webhook verification failed: ${verification.reason}`);
@@ -445,6 +475,19 @@ export class VoiceCallWebhookServer {
     const parsed = this.provider.parseWebhookEvent(ctx, {
       verifiedRequestKey: verification.verifiedRequestKey,
     });
+    const parsedProviderCallId = parsed.events[0]?.providerCallId ?? rawCallSid;
+    const parsedCall = parsedProviderCallId
+      ? this.manager.getCallByProviderCallId(parsedProviderCallId)
+      : undefined;
+    if (parsedCall) {
+      logLatencyEvent(parsedCall, "twiml_generated", { callSid: parsedProviderCallId });
+      if (parsed.providerResponseBody?.includes("<Stream ")) {
+        logLatencyEvent(parsedCall, "stream_requested", { callSid: parsedProviderCallId });
+        if (this.provider.name === "twilio") {
+          this.scheduleStreamAttachFallbackCheck(parsedProviderCallId);
+        }
+      }
+    }
 
     if (verification.isReplay) {
       console.warn("[voice-call] Replay detected; skipping event side effects");
