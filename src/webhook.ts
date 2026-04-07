@@ -212,11 +212,15 @@ export class VoiceCallWebhookServer {
 
         // Speak initial message if one was provided when call was initiated
         // Use setTimeout to allow stream setup to complete
-        setTimeout(() => {
-          this.manager.speakInitialMessage(callId).catch((err) => {
-            console.warn(`[voice-call] Failed to speak initial message:`, err);
-          });
-        }, 500);
+        if ((this.config.conversationEngine ?? "legacy") === "legacy") {
+          setTimeout(() => {
+            this.manager.speakInitialMessage(callId).catch((err) => {
+              console.warn(`[voice-call] Failed to speak initial message:`, err);
+            });
+          }, 500);
+        } else {
+          console.log(`[voice-call] Realtime mode active, skipping provider-side initial message for ${callId}`);
+        }
       },
       onDisconnect: (callId) => {
         console.log(`[voice-call] Media stream disconnected: ${callId}`);

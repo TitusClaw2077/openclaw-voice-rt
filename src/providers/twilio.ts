@@ -577,6 +577,11 @@ export class TwilioProvider implements VoiceCallProvider {
       throw new Error("Missing webhook URL for this call (provider state not initialized)");
     }
 
+    if (this.options.streamPath && !call.streamSid) {
+      console.log("[voice-call] Realtime/streaming mode active, suppressing TwiML <Say> fallback intro");
+      return;
+    }
+
     console.warn(
       "[voice-call] Using TwiML <Say> fallback - telephony TTS not configured or media stream not active",
     );
