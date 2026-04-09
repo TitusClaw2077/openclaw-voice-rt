@@ -65,6 +65,31 @@ describe("VoiceSessionWorker realtime tool bridge", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("uses the default bridge to handle combined day and time queries without calling the model", async () => {
+    const manager = {
+      speak: vi.fn(async () => ({ success: true })),
+    };
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const worker = new VoiceSessionWorker({
+      callId: "call-default-day-time-bridge",
+      config: createVoiceCallBaseConfig(),
+      manager: manager as any,
+      openaiApiKey: "test-key",
+    });
+
+    worker.handleTranscript("what day is it and what time is it?");
+
+    await flushMicrotasks();
+
+    expect(manager.speak).toHaveBeenCalledWith(
+      "call-default-day-time-bridge",
+      expect.stringMatching(/^It's .+, .+\.$/),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("speaks bridge results without calling the model", async () => {
     const manager = {
       speak: vi.fn(async () => ({ success: true })),
