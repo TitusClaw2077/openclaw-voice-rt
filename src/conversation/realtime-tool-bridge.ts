@@ -11,6 +11,32 @@ export interface RealtimeToolBridge {
   handle(request: RealtimeToolRequest): Promise<RealtimeToolResult | null>;
 }
 
+// ---------------------------------------------------------------------------
+// Weather provider interface
+// ---------------------------------------------------------------------------
+
+export type WeatherResult = {
+  spoken: string;
+};
+
+export interface WeatherProvider {
+  getCurrent(): Promise<WeatherResult>;
+}
+
+/**
+ * Fallback weather provider used when no real implementation is injected.
+ * Returns a fixed "unavailable" response so the bridge stays non-null-safe.
+ */
+class UnavailableWeatherProvider implements WeatherProvider {
+  async getCurrent(): Promise<WeatherResult> {
+    return { spoken: "I don't have weather access right now, sorry." };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Intent types
+// ---------------------------------------------------------------------------
+
 type TimeDayIntent = {
   wantsTime: boolean;
   wantsDay: boolean;
@@ -20,27 +46,37 @@ type MinimalRealtimeToolBridgeOptions = {
   locale?: string;
   now?: () => Date;
   timeZone?: string;
+  weatherProvider?: WeatherProvider;
 };
 
 export class MinimalRealtimeToolBridge implements RealtimeToolBridge {
   private readonly locale: string;
   private readonly now: () => Date;
   private readonly timeZone: string;
+  private readonly _weatherProvider: WeatherProvider;
 
   constructor(options: MinimalRealtimeToolBridgeOptions = {}) {
     this.locale = options.locale ?? "en-US";
     this.now = options.now ?? (() => new Date());
     this.timeZone =
       options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+    this._weatherProvider = options.weatherProvider ?? new UnavailableWeatherProvider();
   }
 
   async handle(request: RealtimeToolRequest): Promise<RealtimeToolResult | null> {
-    const intent = detectTimeDayIntent(request.transcript);
-    if (!intent) {
-      return null;
+    // Time/day — deterministic, no I/O
+    const timeIntent = detectTimeDayIntent(request.transcript);
+    if (timeIntent) {
+      return { spoken: this.formatTimeDay(timeIntent) };
     }
 
-    return { spoken: this.formatTimeDay(intent) };
+    // Weather — pluggable provider
+    if (isWeatherQuery(request.transcript)) {
+      const result = await this._weatherProvider.getCurrent();
+      return { spoken: result.spoken };
+    }
+
+    return null;
   }
 
   private formatTimeDay(intent: TimeDayIntent): string {
@@ -108,6 +144,17 @@ function detectTimeDayIntent(transcript: string): TimeDayIntent | null {
     wantsTime,
     wantsDay,
   };
+}
+
+function isWeatherQuery(transcript: string): boolean {
+  const normalized = normalizeForIntent(transcript);
+  return (
+    /\bweather\b/.test(normalized) ||
+    /\btemperature\b/.test(normalized) ||
+    /\bhow (hot|cold|warm|cool|humid) is it\b/.test(normalized) ||
+    /\bwhat is it like outside\b/.test(normalized) ||
+    /\bhow s it outside\b/.test(normalized)
+  );
 }
 
 function normalizeForIntent(value: string): string {
