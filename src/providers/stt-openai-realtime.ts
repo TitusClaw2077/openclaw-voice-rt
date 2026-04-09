@@ -229,10 +229,13 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
   }): void {
     switch (event.type) {
       case "transcription_session.created":
-      case "transcription_session.updated":
       case "session.created":
-      case "session.updated":
         console.log(`[RealtimeSTT] ${event.type}`);
+        break;
+
+      case "transcription_session.updated":
+      case "session.updated":
+        console.log(`[RealtimeSTT] ${event.type} config: ${JSON.stringify((event as { session?: unknown }).session, null, 2)}`);
         break;
 
       case "input_audio_buffer.speech_stopped":
@@ -265,7 +268,13 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
       }
 
       case "conversation.item.input_audio_transcription.failed":
-        console.error("[RealtimeSTT] Transcription failed:", event.error ?? event);
+        const errCode = event.error?.code ?? 'unknown';
+        const errMsg = event.error?.message ?? 'no message';
+        console.error(`[RealtimeSTT] Transcription failed (code: ${errCode}): ${errMsg}`);
+        if (errCode === 'insufficient_quota') {
+          console.error('[RealtimeSTT] BILLING: OpenAI account has insufficient quota for Realtime transcription. Top up at https://platform.openai.com/account/billing');
+        }
+        console.error('[RealtimeSTT] Full error:', JSON.stringify(event.error, null, 2));
         this.pendingTranscript = "";
         break;
 
