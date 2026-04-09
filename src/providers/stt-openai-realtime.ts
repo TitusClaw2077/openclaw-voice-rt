@@ -217,13 +217,32 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
     delta?: string;
     transcript?: string;
     error?: unknown;
+    item?: {
+      id?: string;
+      type?: string;
+      role?: string;
+      status?: string;
+      content?: Array<{ type?: string; transcript?: string; text?: string }>;
+    };
+    item_id?: string;
+    previous_item_id?: string | null;
   }): void {
     switch (event.type) {
       case "transcription_session.created":
       case "transcription_session.updated":
-      case "input_audio_buffer.speech_stopped":
-      case "input_audio_buffer.committed":
+      case "session.created":
+      case "session.updated":
         console.log(`[RealtimeSTT] ${event.type}`);
+        break;
+
+      case "input_audio_buffer.speech_stopped":
+        console.log(`[RealtimeSTT] ${event.type}`);
+        break;
+
+      case "input_audio_buffer.committed":
+        console.log(
+          `[RealtimeSTT] ${event.type} item_id=${event.item_id ?? "unknown"} previous_item_id=${event.previous_item_id ?? "none"}`,
+        );
         break;
 
       case "conversation.item.input_audio_transcription.delta":
@@ -233,12 +252,27 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
         }
         break;
 
-      case "conversation.item.input_audio_transcription.completed":
-        if (event.transcript) {
-          console.log(`[RealtimeSTT] Transcript: ${event.transcript}`);
-          this.onTranscriptCallback?.(event.transcript);
+      case "conversation.item.input_audio_transcription.completed": {
+        const transcript = this.extractTranscript(event);
+        if (transcript) {
+          console.log(`[RealtimeSTT] Transcript: ${transcript}`);
+          this.onTranscriptCallback?.(transcript);
+        } else {
+          console.warn("[RealtimeSTT] completion event arrived without transcript payload", event);
         }
         this.pendingTranscript = "";
+        break;
+      }
+
+      case "conversation.item.input_audio_transcription.failed":
+        console.error("[RealtimeSTT] Transcription failed:", event.error ?? event);
+        this.pendingTranscript = "";
+        break;
+
+      case "conversation.item.created":
+        console.log(
+          `[RealtimeSTT] conversation.item.created id=${event.item?.id ?? event.item_id ?? "unknown"} type=${event.item?.type ?? "unknown"} role=${event.item?.role ?? "unknown"} status=${event.item?.status ?? "unknown"}`,
+        );
         break;
 
       case "input_audio_buffer.speech_started":
@@ -250,7 +284,37 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
       case "error":
         console.error("[RealtimeSTT] Error:", event.error);
         break;
+
+      default:
+        console.log(`[RealtimeSTT] Unhandled event: ${event.type}`, event);
+        break;
     }
+  }
+
+  private extractTranscript(event: {
+    transcript?: string;
+    item?: {
+      content?: Array<{ transcript?: string; text?: string }>;
+    };
+  }): string | null {
+    if (typeof event.transcript === "string" && event.transcript.trim()) {
+      return event.transcript.trim();
+    }
+
+    for (const content of event.item?.content ?? []) {
+      if (typeof content.transcript === "string" && content.transcript.trim()) {
+        return content.transcript.trim();
+      }
+      if (typeof content.text === "string" && content.text.trim()) {
+        return content.text.trim();
+      }
+    }
+
+    if (this.pendingTranscript.trim()) {
+      return this.pendingTranscript.trim();
+    }
+
+    return null;
   }
 
   private sendEvent(event: unknown): void {
