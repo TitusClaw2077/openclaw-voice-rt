@@ -15,6 +15,31 @@ describe("VoiceSessionWorker realtime tool bridge", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses the default bridge to handle day queries without calling the model", async () => {
+    const manager = {
+      speak: vi.fn(async () => ({ success: true })),
+    };
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const worker = new VoiceSessionWorker({
+      callId: "call-default-bridge",
+      config: createVoiceCallBaseConfig(),
+      manager: manager as any,
+      openaiApiKey: "test-key",
+    });
+
+    worker.handleTranscript("what day is it?");
+
+    await flushMicrotasks();
+
+    expect(manager.speak).toHaveBeenCalledWith(
+      "call-default-bridge",
+      expect.stringMatching(/^Today is .+\.$/),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("speaks bridge results without calling the model", async () => {
     const manager = {
       speak: vi.fn(async () => ({ success: true })),
