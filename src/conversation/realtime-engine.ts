@@ -1,4 +1,6 @@
 import { VoiceSessionWorker, type VoiceSessionWorkerOptions } from "./voice-session-worker.js";
+import { MinimalRealtimeToolBridge } from "./realtime-tool-bridge.js";
+import { WttrWeatherProvider } from "./wttr-weather-provider.js";
 import type { ConversationEngine } from "./base.js";
 import type { VoiceCallConfig } from "../config.js";
 import type { CoreConfig } from "../core-bridge.js";
@@ -35,11 +37,19 @@ export class RealtimeEngine implements ConversationEngine {
         throw new Error("OPENAI_API_KEY is required");
       }
 
+      const location =
+        typeof (this.config as Record<string, unknown>).weatherLocation === "string"
+          ? (this.config as unknown as { weatherLocation?: string }).weatherLocation?.trim()
+          : undefined;
+      const weatherProvider = new WttrWeatherProvider({ location });
+      const toolBridge = new MinimalRealtimeToolBridge({ weatherProvider });
+
       const workerOptions: VoiceSessionWorkerOptions = {
         callId: call.callId,
         config: this.config,
         manager: this.manager,
         openaiApiKey,
+        toolBridge,
         onEscalate: (callId: string, task: string) => {
           console.log(`[RealtimeEngine] escalating task for callId ${callId}: ${task}`);
         },
