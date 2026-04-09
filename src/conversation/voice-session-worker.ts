@@ -1,5 +1,9 @@
 import type { VoiceCallConfig } from "../config.js";
 import type { CallManager } from "../manager.js";
+import {
+  MinimalRealtimeToolBridge,
+  type RealtimeToolBridge,
+} from "./realtime-tool-bridge.js";
 
 export type WorkerState = "idle" | "listening" | "generating" | "speaking" | "interrupted" | "ended";
 
@@ -11,6 +15,7 @@ export interface VoiceSessionWorkerOptions {
   model?: string;
   onStateChange?: (state: WorkerState) => void;
   onEscalate?: (callId: string, task: string) => void;
+  toolBridge?: RealtimeToolBridge;
 }
 
 type ChatRole = "system" | "user" | "assistant";
@@ -90,6 +95,7 @@ export class VoiceSessionWorker {
   private readonly _model: string;
   private readonly _onStateChange?: (state: WorkerState) => void;
   private readonly _onEscalate?: (callId: string, task: string) => void;
+  private readonly _toolBridge: RealtimeToolBridge;
   private _history: ChatMessage[] = [];
   private _generationController: AbortController | null = null;
   private _generationVersion = 0;
@@ -106,6 +112,7 @@ export class VoiceSessionWorker {
     this._model = resolveModelName(pickModelRef(opts.config.responseModel, opts.model));
     this._onStateChange = opts.onStateChange;
     this._onEscalate = opts.onEscalate;
+    this._toolBridge = opts.toolBridge ?? new MinimalRealtimeToolBridge();
     this._setState("listening");
   }
 
@@ -123,7 +130,7 @@ export class VoiceSessionWorker {
     const generationVersion = ++this._generationVersion;
     this._generationController = controller;
 
-    void this._generateReply(generationVersion, controller);
+    void this._respondToTranscript(normalizedText, generationVersion, controller);
   }
 
   interrupt(): void {
@@ -266,6 +273,47 @@ export class VoiceSessionWorker {
         this._generationController = null;
         this._setState("listening");
       }
+    } catch (error) {
+      if (this._isStaleGeneration(generationVersion, controller)) {
+        return;
+      }
+
+      this._generationController = null;
+      console.error(`[VoiceSessionWorker:${this.callId}]`, error);
+      this._setState("listening");
+    }
+  }
+
+  private async _respondToTranscript(
+    text: string,
+    generationVersion: number,
+    controller: AbortController,
+  ): Promise<void> {
+    try {
+      const toolResult = await this._toolBridge.handle({
+        transcript: text,
+        signal: controller.signal,
+      });
+
+      if (this._isStaleGeneration(generationVersion, controller)) {
+        return;
+      }
+
+      if (!toolResult?.spoken?.trim()) {
+        await this._generateReply(generationVersion, controller);
+        return;
+      }
+
+      this._setState("speaking");
+      await this._speak(toolResult.spoken.trim());
+
+      if (this._isStaleGeneration(generationVersion, controller)) {
+        return;
+      }
+
+      this._appendHistory("assistant", toolResult.spoken.trim());
+      this._generationController = null;
+      this._setState("listening");
     } catch (error) {
       if (this._isStaleGeneration(generationVersion, controller)) {
         return;
